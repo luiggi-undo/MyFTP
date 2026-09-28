@@ -45,7 +45,7 @@ final class FTPSocket {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             if let error = input.streamError ?? output.streamError {
-                throw FTPError.connectionFailed(error.localizedDescription)
+                throw Self.describe(error)
             }
             let states = [input.streamStatus, output.streamStatus]
             if states.contains(.error) {
@@ -66,13 +66,17 @@ final class FTPSocket {
     }
 
     private func enableTLS(_ tls: FTPTLSSettings) {
-        var sslSettings: [String: Any] = [kCFStreamSSLPeerName as String: tls.peerName]
+        var sslSettings: [String: Any] = [
+            kCFStreamSSLLevel as String: kCFStreamSocketSecurityLevelNegotiatedSSL as String,
+            kCFStreamSSLPeerName as String: tls.peerName,
+        ]
         if tls.allowInvalidCertificates {
+            // Omite la comprobación de la cadena y del nombre: acepta certificados autofirmados.
             sslSettings[kCFStreamSSLValidatesCertificateChain as String] = false
         }
-        input.setProperty(StreamSocketSecurityLevel.negotiatedSSL, forKey: .socketSecurityLevelKey)
-        output.setProperty(StreamSocketSecurityLevel.negotiatedSSL, forKey: .socketSecurityLevelKey)
-        input.setProperty(sslSettings, forKey: Stream.PropertyKey(kCFStreamPropertySSLSettings as String))
+        let key = Stream.PropertyKey(kCFStreamPropertySSLSettings as String)
+        input.setProperty(sslSettings, forKey: key)
+        output.setProperty(sslSettings, forKey: key)
         needsBlockingRead = true
     }
 
@@ -98,7 +102,7 @@ final class FTPSocket {
                     continue
                 }
                 if written < 0 {
-                    throw FTPError.connectionFailed(output.streamError?.localizedDescription ?? "error de escritura")
+                    throw Self.describe(output.streamError, fallback: "error de escritura")
                 }
                 if output.streamStatus == .atEnd || output.streamStatus == .closed {
                     throw FTPError.connectionClosed
@@ -161,7 +165,7 @@ final class FTPSocket {
             case .atEnd, .closed:
                 return false
             case .error:
-                throw FTPError.connectionFailed(input.streamError?.localizedDescription ?? "error de lectura")
+                throw Self.describe(input.streamError, fallback: "error de lectura")
             default:
                 break
             }
@@ -177,6 +181,30 @@ final class FTPSocket {
             return true
         }
         if count == 0 { return false }
-        throw FTPError.connectionFailed(input.streamError?.localizedDescription ?? "error de lectura")
+        throw Self.describe(input.streamError, fallback: "error de lectura")
+    }
+
+    // MARK: Errores
+
+    /// Traduce los errores de socket y de TLS (códigos OSStatus de Secure Transport) a mensajes claros.
+    static func describe(_ error: Error?, fallback: String = "error de socket") -> FTPError {
+        guard let error else { return .connectionFailed(fallback) }
+        let nsError = error as NSError
+        if nsError.domain == NSOSStatusErrorDomain {
+            switch nsError.code {
+            case -9807, -9808, -9812, -9813, -9814, -9815, -9843:
+                // errSSLXCertChainInvalid, errSSLBadCert, errSSLUnknownRootCert, errSSLNoRootCert,
+                // errSSLCertExpired, errSSLCertNotYetValid, errSSLHostNameMismatch
+                return .untrustedCertificate(code: nsError.code)
+            case -9806, -9805:
+                // errSSLClosedAbort, errSSLClosedGraceful
+                return .connectionFailed("el servidor cortó la negociación TLS (\(nsError.code)). Comprueba el tipo de seguridad (FTPS explícito o implícito) y el puerto.")
+            case -9800 ... -9899:
+                return .connectionFailed("error TLS \(nsError.code)")
+            default:
+                break
+            }
+        }
+        return .connectionFailed(error.localizedDescription)
     }
 }

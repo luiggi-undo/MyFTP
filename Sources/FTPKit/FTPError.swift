@@ -3,6 +3,7 @@ import Foundation
 public enum FTPError: LocalizedError, Sendable {
     case connectionFailed(String)
     case connectionClosed
+    case untrustedCertificate(code: Int)
     case timeout
     case malformedReply(String)
     case unexpectedReply(command: String, reply: FTPReply)
@@ -17,6 +18,8 @@ public enum FTPError: LocalizedError, Sendable {
             return "No se pudo conectar: \(reason)"
         case .connectionClosed:
             return "El servidor cerró la conexión."
+        case .untrustedCertificate(let code):
+            return "El certificado TLS del servidor no es de confianza (\(code)): es autofirmado, ha caducado o pertenece a otro dominio. Conéctate usando el nombre de servidor que figura en el certificado o, si confías en él, activa «Aceptar certificados no válidos o autofirmados»."
         case .timeout:
             return "Se agotó el tiempo de espera."
         case .malformedReply(let line):
