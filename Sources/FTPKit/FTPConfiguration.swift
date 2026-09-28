@@ -79,3 +79,6 @@ public final class FTPCancellationToken: @unchecked Sendable {
 }
 
 public typealias FTPProgressHandler = @Sendable (_ transferred: Int64, _ total: Int64?) -> Void
+
+/// Archivo en curso dentro de una transferencia de carpeta: ruta relativa, posición y total.
+public typealias FTPFileHandler = @Sendable (_ relativePath: String, _ index: Int, _ count: Int) -> Void

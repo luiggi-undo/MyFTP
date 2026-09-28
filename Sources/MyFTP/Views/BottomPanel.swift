@@ -72,6 +72,13 @@ struct TransferRow: View {
     var body: some View {
         HStack(spacing: 10) {
             Image(systemName: transfer.direction == .download ? "arrow.down.circle" : "arrow.up.circle")
+                .overlay(alignment: .bottomTrailing) {
+                    if transfer.isDirectory {
+                        Image(systemName: "folder.fill")
+                            .font(.system(size: 8))
+                            .offset(x: 3, y: 3)
+                    }
+                }
                 .font(.title3)
                 .foregroundStyle(.secondary)
 
@@ -100,6 +107,12 @@ struct TransferRow: View {
                 }
                 .buttonStyle(.borderless)
                 .help("Cancelar")
+            } else if transfer.canResume {
+                Button { browser.resume(transfer) } label: {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                }
+                .buttonStyle(.borderless)
+                .help("Reanudar donde se quedó")
             } else if transfer.state == .completed, transfer.direction == .download {
                 Button { browser.revealInFinder(transfer) } label: {
                     Image(systemName: "magnifyingglass.circle.fill")
@@ -116,11 +129,14 @@ struct TransferRow: View {
         case .queued:
             return "En cola"
         case .running:
-            let done = ByteCountFormatter.string(fromByteCount: transfer.transferred, countStyle: .file)
+            var text = ByteCountFormatter.string(fromByteCount: transfer.transferred, countStyle: .file)
             if let total = transfer.total {
-                return "\(done) de \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))"
+                text += " de \(ByteCountFormatter.string(fromByteCount: total, countStyle: .file))"
             }
-            return done
+            if let file = transfer.currentFile {
+                text += " — \(file)"
+            }
+            return text
         case .completed:
             return "Completado"
         case .failed(let message):

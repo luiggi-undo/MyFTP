@@ -48,7 +48,7 @@ struct BrowserView: View {
         .navigationSubtitle(browser.path)
         .toolbar { toolbarContent }
         .onChange(of: browser.path) { selection.removeAll() }
-        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item], allowsMultipleSelection: true) { result in
+        .fileImporter(isPresented: $showImporter, allowedContentTypes: [.item, .folder], allowsMultipleSelection: true) { result in
             if case .success(let urls) = result { browser.upload(urls) }
         }
         .alert("Nueva carpeta", isPresented: $showNewFolder) {
@@ -131,14 +131,15 @@ struct BrowserView: View {
             let items = browser.items.filter { ids.contains($0.id) }
             if items.isEmpty {
                 Button("Nueva carpeta…") { showNewFolder = true }
-                Button("Subir archivos…") { showImporter = true }
+                Button("Subir archivos o carpetas…") { showImporter = true }
                 Button("Actualizar") { browser.refresh() }
             } else {
+                if items.count == 1, items[0].kind != .file {
+                    Button("Abrir") { browser.activate(items[0]) }
+                }
+                Button("Descargar") { browser.download(items) }
                 if items.count == 1 {
-                    Button(items[0].isDirectory ? "Abrir" : "Descargar") { browser.activate(items[0]) }
                     Button("Renombrar…") { startRename(items[0]) }
-                } else {
-                    Button("Descargar") { browser.download(items) }
                 }
                 Divider()
                 Button("Eliminar…", role: .destructive) { pendingDelete = items }
@@ -209,7 +210,7 @@ struct BrowserView: View {
                 Label("Subir", systemImage: "square.and.arrow.up")
             }
             .keyboardShortcut("u")
-            .help("Subir archivos")
+            .help("Subir archivos o carpetas")
 
             Button { browser.download(selectedItems) } label: {
                 Label("Descargar", systemImage: "square.and.arrow.down")

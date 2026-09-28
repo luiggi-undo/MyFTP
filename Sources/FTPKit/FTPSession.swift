@@ -59,19 +59,47 @@ public final class FTPSession: @unchecked Sendable {
     public func download(
         _ remotePath: String,
         to localURL: URL,
+        resume: Bool = false,
         cancellation: FTPCancellationToken? = nil,
         progress: FTPProgressHandler? = nil
     ) async throws {
-        try await run { try $0.download(remotePath, to: localURL, cancellation: cancellation, progress: progress) }
+        try await run { try $0.download(remotePath, to: localURL, resume: resume, cancellation: cancellation, progress: progress) }
     }
 
     public func upload(
         _ localURL: URL,
         to remotePath: String,
+        resume: Bool = false,
         cancellation: FTPCancellationToken? = nil,
         progress: FTPProgressHandler? = nil
     ) async throws {
-        try await run { try $0.upload(localURL, to: remotePath, cancellation: cancellation, progress: progress) }
+        try await run { try $0.upload(localURL, to: remotePath, resume: resume, cancellation: cancellation, progress: progress) }
+    }
+
+    public func downloadDirectory(
+        _ remotePath: String,
+        to localURL: URL,
+        resume: Bool = false,
+        cancellation: FTPCancellationToken? = nil,
+        progress: FTPProgressHandler? = nil,
+        onFile: FTPFileHandler? = nil
+    ) async throws {
+        try await run {
+            try $0.downloadDirectory(remotePath, to: localURL, resume: resume, cancellation: cancellation, progress: progress, onFile: onFile)
+        }
+    }
+
+    public func uploadDirectory(
+        _ localURL: URL,
+        to remotePath: String,
+        resume: Bool = false,
+        cancellation: FTPCancellationToken? = nil,
+        progress: FTPProgressHandler? = nil,
+        onFile: FTPFileHandler? = nil
+    ) async throws {
+        try await run {
+            try $0.uploadDirectory(localURL, to: remotePath, resume: resume, cancellation: cancellation, progress: progress, onFile: onFile)
+        }
     }
 
     private func run<T: Sendable>(_ work: @escaping @Sendable (FTPClient) throws -> T) async throws -> T {

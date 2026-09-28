@@ -13,8 +13,9 @@ Cliente FTP/FTPS básico para macOS, escrito en Swift y SwiftUI, sin dependencia
 - Modo pasivo (`EPSV`, y `PASV` si el servidor no admite `EPSV`).
 - Listados con `MLSD` cuando el servidor lo admite. Si no, se usa `LIST` en formato Unix o DOS/IIS.
 - Navegación por carpetas, con ordenación por nombre, tamaño y fecha.
-- Descarga de archivos a la carpeta **Descargas**: doble clic, menú contextual o barra de herramientas.
-- Subida de archivos arrastrándolos desde el Finder o con el botón **Subir**.
+- Descarga de archivos y carpetas completas a la carpeta **Descargas**: doble clic, menú contextual o barra de herramientas.
+- Subida de archivos y carpetas completas arrastrándolos desde el Finder o con el botón **Subir**.
+- Reanudación de transferencias fallidas (`REST`): el botón ↻ continúa donde se quedó. En carpetas se saltan los archivos ya completos.
 - Crear carpetas, renombrar y eliminar. Las carpetas se borran con todo su contenido.
 - Cola de transferencias con progreso y cancelación. Usa una segunda conexión, así que puedes seguir navegando mientras se transfiere.
 - Registro de las órdenes y respuestas FTP. La contraseña no aparece.
@@ -32,6 +33,30 @@ swift build
 swift run MyFTP
 swift test        # tests de los parsers del protocolo
 ```
+
+## Crear la app (.app firmada)
+
+```sh
+./scripts/build-app.sh
+```
+
+Genera `build/MyFTP.app` y `build/MyFTP.zip`. Sin más opciones, la firma es ad hoc: la app funciona en tu Mac, pero no sirve para distribuirla.
+
+Para distribuirla a otros Macs necesitas un certificado **Developer ID Application**, que se obtiene con una cuenta del Apple Developer Program:
+
+```sh
+# Una sola vez: guardar las credenciales de notarización en el Llavero
+xcrun notarytool store-credentials myftp-notary --apple-id tu@correo.com --team-id TEAMID
+
+SIGN_IDENTITY="Developer ID Application: Tu Nombre (TEAMID)" \
+NOTARY_PROFILE=myftp-notary \
+VERSION=1.0 BUILD=1 \
+./scripts/build-app.sh
+```
+
+Para ver las identidades de firma disponibles: `security find-identity -v -p codesigning`.
+
+Si pones un icono en `Resources/AppIcon.icns`, el script lo incluye en la app.
 
 ## Estructura
 
@@ -57,8 +82,7 @@ Tests/FTPKitTests/        Tests (swift-testing)
 ## Limitaciones conocidas
 
 - Solo modo pasivo; el modo activo (`PORT`/`EPRT`) no está implementado.
-- Por ahora solo se suben y descargan archivos sueltos, no carpetas completas.
-- No se reanudan transferencias interrumpidas (`REST`).
+- En las transferencias de carpetas se omiten los enlaces simbólicos, para evitar bucles.
+- Una transferencia cancelada borra los datos parciales y no se puede reanudar. Una que falla sí.
 - Algunos servidores FTPS exigen reutilizar la sesión TLS en el canal de datos (por ejemplo, vsftpd con `require_ssl_reuse=YES`). Con esos servidores los listados y las transferencias pueden fallar.
 - La pila TLS de Foundation Streams puede no negociar TLS 1.3. Todos los servidores FTPS habituales aceptan TLS 1.2.
-- El ejecutable del paquete no se firma ni se distribuye como `.app`. Para distribuirlo habría que crear un proyecto de app en Xcode con este paquete como dependencia.

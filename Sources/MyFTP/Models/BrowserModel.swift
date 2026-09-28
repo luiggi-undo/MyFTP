@@ -22,17 +22,36 @@ final class Transfer: Identifiable {
     let direction: Direction
     let name: String
     let remotePath: String
+    let isDirectory: Bool
     var localURL: URL?
     var transferred: Int64 = 0
     var total: Int64?
     var state: State = .queued
-    @ObservationIgnored let token = FTPCancellationToken()
+    /// En carpetas: archivo en curso ("3/40 · css/estilos.css").
+    var currentFile: String?
+    /// La próxima ejecución continúa donde se quedó la anterior.
+    var resumeRequested = false
+    @ObservationIgnored private(set) var token = FTPCancellationToken()
 
-    init(direction: Direction, name: String, remotePath: String, localURL: URL?) {
+    init(direction: Direction, name: String, remotePath: String, localURL: URL?, isDirectory: Bool = false) {
         self.direction = direction
         self.name = name
         self.remotePath = remotePath
         self.localURL = localURL
+        self.isDirectory = isDirectory
+    }
+
+    /// Prepara la transferencia para volver a ejecutarse continuando donde se quedó.
+    func prepareResume() {
+        token = FTPCancellationToken()
+        resumeRequested = true
+        currentFile = nil
+        state = .queued
+    }
+
+    var canResume: Bool {
+        if case .failed = state { return true }
+        return false
     }
 
     var fraction: Double? {
@@ -182,34 +201,44 @@ final class BrowserModel {
     // MARK: Transferencias
 
     func download(_ selected: [FTPItem]) {
-        let files = selected.filter { $0.kind != .directory }
-        if files.count < selected.count {
-            errorMessage = "Por ahora solo se pueden descargar archivos, no carpetas."
-        }
-        for item in files {
-            enqueue(Transfer(direction: .download, name: item.name, remotePath: FTPPath.join(path, item.name), localURL: nil))
+        for item in selected {
+            enqueue(Transfer(
+                direction: .download,
+                name: item.name,
+                remotePath: FTPPath.join(path, item.name),
+                localURL: nil,
+                isDirectory: item.isDirectory
+            ))
         }
     }
 
     func upload(_ urls: [URL]) {
-        var skipped = false
         for url in urls {
             var isDirectory: ObjCBool = false
-            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), !isDirectory.boolValue else {
-                skipped = true
-                continue
-            }
+            guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }
             let name = url.lastPathComponent
-            enqueue(Transfer(direction: .upload, name: name, remotePath: FTPPath.join(path, name), localURL: url))
-        }
-        if skipped {
-            errorMessage = "Por ahora solo se pueden subir archivos, no carpetas."
+            enqueue(Transfer(
+                direction: .upload,
+                name: name,
+                remotePath: FTPPath.join(path, name),
+                localURL: url,
+                isDirectory: isDirectory.boolValue
+            ))
         }
     }
 
     func cancel(_ transfer: Transfer) {
         transfer.token.cancel()
         if transfer.state == .queued { transfer.state = .cancelled }
+    }
+
+    /// Vuelve a poner en cola una transferencia fallida, continuando donde se quedó.
+    func resume(_ transfer: Transfer) {
+        guard transfer.canResume else { return }
+        transfer.prepareResume()
+        if transferTask == nil {
+            transferTask = Task { await runTransferQueue() }
+        }
     }
 
     func clearFinishedTransfers() {
@@ -245,21 +274,45 @@ final class BrowserModel {
                 }
             }
         }
+        let onFile: FTPFileHandler = { relative, index, count in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    transfer.currentFile = "\(index)/\(count) · \(relative)"
+                }
+            }
+        }
+        let resume = transfer.resumeRequested
+        let token = transfer.token
 
         do {
             let session = try await connectedTransferSession()
             switch transfer.direction {
             case .download:
-                let destination = Self.uniqueDownloadURL(for: transfer.name)
+                // Al reanudar se escribe sobre el mismo destino; si no, se elige un nombre libre.
+                let destination = resume ? (transfer.localURL ?? Self.uniqueDownloadURL(for: transfer.name))
+                                         : Self.uniqueDownloadURL(for: transfer.name)
                 transfer.localURL = destination
-                try await session.download(transfer.remotePath, to: destination, cancellation: transfer.token, progress: progress)
+                if transfer.isDirectory {
+                    try await session.downloadDirectory(transfer.remotePath, to: destination, resume: resume,
+                                                        cancellation: token, progress: progress, onFile: onFile)
+                } else {
+                    try await session.download(transfer.remotePath, to: destination, resume: resume,
+                                               cancellation: token, progress: progress)
+                }
             case .upload:
                 guard let source = transfer.localURL else { throw FTPError.localFile("archivo de origen no indicado") }
-                try await session.upload(source, to: transfer.remotePath, cancellation: transfer.token, progress: progress)
+                if transfer.isDirectory {
+                    try await session.uploadDirectory(source, to: transfer.remotePath, resume: resume,
+                                                      cancellation: token, progress: progress, onFile: onFile)
+                } else {
+                    try await session.upload(source, to: transfer.remotePath, resume: resume,
+                                             cancellation: token, progress: progress)
+                }
                 if FTPPath.parent(of: transfer.remotePath) == path {
                     refresh()
                 }
             }
+            transfer.currentFile = nil
             transfer.state = .completed
         } catch FTPError.cancelled {
             transfer.state = .cancelled

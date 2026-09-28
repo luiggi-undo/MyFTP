@@ -132,20 +132,27 @@ public final class FTPClient: @unchecked Sendable {
         try check(try send("RMD \(path)"), for: "RMD")
     }
 
-    /// Borra una carpeta y todo su contenido.
-    public func removeDirectoryRecursively(_ path: String) throws {
+    /// Lista una carpeta sin cambiar el directorio actual.
+    public func listDirectory(_ path: String) throws -> [FTPItem] {
         let previous = try currentDirectory()
         try changeDirectory(path)
-        let items: [FTPItem]
-        do {
-            items = try list()
-        } catch {
-            try? changeDirectory(previous)
-            throw error
-        }
-        try changeDirectory(previous)
+        defer { try? changeDirectory(previous) }
+        return try list()
+    }
 
-        for item in items {
+    /// Crea la carpeta si no existe.
+    public func ensureDirectory(_ path: String) throws {
+        let reply = try send("MKD \(path)")
+        if reply.isPositiveCompletion { return }
+        // MKD falla también cuando la carpeta ya existe: se comprueba entrando en ella.
+        let previous = try currentDirectory()
+        try changeDirectory(path)
+        try changeDirectory(previous)
+    }
+
+    /// Borra una carpeta y todo su contenido.
+    public func removeDirectoryRecursively(_ path: String) throws {
+        for item in try listDirectory(path) {
             let child = FTPPath.join(path, item.name)
             if item.isDirectory {
                 try removeDirectoryRecursively(child)
@@ -173,43 +180,211 @@ public final class FTPClient: @unchecked Sendable {
     }
 
     // MARK: Transferencias
+    //
+    // Con `resume: true` se continúa donde se quedó una transferencia anterior (REST):
+    // en descargas a partir del tamaño del archivo local y en subidas a partir del
+    // tamaño del remoto. Si el servidor no admite REST, se empieza desde el principio.
+    // Si falla, se conservan los datos parciales para poder reanudar; si se cancela, se borran.
+
+    public var supportsResume: Bool { features.contains("REST") }
 
     public func download(
         _ remotePath: String,
         to localURL: URL,
+        resume: Bool = false,
         cancellation: FTPCancellationToken? = nil,
         progress: FTPProgressHandler? = nil
     ) throws {
         let total = try size(of: remotePath)
-        guard FileManager.default.createFile(atPath: localURL.path, contents: nil) else {
-            throw FTPError.localFile("no se pudo crear \(localURL.path)")
-        }
-
+        let reporter = ProgressReporter(total: total, handler: progress)
         do {
-            let handle = try FileHandle(forWritingTo: localURL)
-            defer { try? handle.close() }
-            let reporter = ProgressReporter(total: total, handler: progress)
-
-            try withDataConnection(command: "RETR \(remotePath)") { data in
-                while let chunk = try data.readChunk() {
-                    if cancellation?.isCancelled == true { throw FTPError.cancelled }
-                    try handle.write(contentsOf: chunk)
-                    reporter.add(Int64(chunk.count))
-                }
-                reporter.finish()
-            }
-        } catch {
+            try downloadFile(remotePath, to: localURL, remoteSize: total, resume: resume, cancellation: cancellation, reporter: reporter)
+            reporter.finish()
+        } catch FTPError.cancelled {
             try? FileManager.default.removeItem(at: localURL)
-            throw error
+            throw FTPError.cancelled
         }
     }
 
     public func upload(
         _ localURL: URL,
         to remotePath: String,
+        resume: Bool = false,
         cancellation: FTPCancellationToken? = nil,
         progress: FTPProgressHandler? = nil
     ) throws {
+        let total = Self.localSize(of: localURL)
+        let reporter = ProgressReporter(total: total, handler: progress)
+        try uploadFile(localURL, to: remotePath, localSize: total ?? 0, resume: resume, cancellation: cancellation, reporter: reporter)
+        reporter.finish()
+    }
+
+    /// Descarga una carpeta remota con todo su contenido en `localURL`.
+    /// `onFile` recibe la ruta relativa del archivo en curso, su posición y el total de archivos.
+    public func downloadDirectory(
+        _ remotePath: String,
+        to localURL: URL,
+        resume: Bool = false,
+        cancellation: FTPCancellationToken? = nil,
+        progress: FTPProgressHandler? = nil,
+        onFile: FTPFileHandler? = nil
+    ) throws {
+        do {
+            var directories: [String] = []
+            var files: [(relative: String, size: Int64?)] = []
+            try collectRemote(remotePath, relative: "", directories: &directories, files: &files, cancellation: cancellation)
+
+            let reporter = ProgressReporter(total: files.reduce(Int64(0)) { $0 + ($1.size ?? 0) }, handler: progress)
+            try FileManager.default.createDirectory(at: localURL, withIntermediateDirectories: true)
+            for directory in directories {
+                try FileManager.default.createDirectory(at: localURL.appendingPathComponent(directory), withIntermediateDirectories: true)
+            }
+            for (index, file) in files.enumerated() {
+                if cancellation?.isCancelled == true { throw FTPError.cancelled }
+                onFile?(file.relative, index + 1, files.count)
+                try downloadFile(
+                    FTPPath.join(remotePath, file.relative),
+                    to: localURL.appendingPathComponent(file.relative),
+                    remoteSize: file.size,
+                    resume: resume,
+                    cancellation: cancellation,
+                    reporter: reporter
+                )
+            }
+            reporter.finish()
+        } catch FTPError.cancelled {
+            try? FileManager.default.removeItem(at: localURL)
+            throw FTPError.cancelled
+        }
+    }
+
+    /// Sube una carpeta local con todo su contenido a `remotePath` (se crea si no existe).
+    public func uploadDirectory(
+        _ localURL: URL,
+        to remotePath: String,
+        resume: Bool = false,
+        cancellation: FTPCancellationToken? = nil,
+        progress: FTPProgressHandler? = nil,
+        onFile: FTPFileHandler? = nil
+    ) throws {
+        let keys: [URLResourceKey] = [.isDirectoryKey, .isSymbolicLinkKey, .fileSizeKey]
+        guard let enumerator = FileManager.default.enumerator(at: localURL, includingPropertiesForKeys: keys) else {
+            throw FTPError.localFile("no se puede leer \(localURL.path)")
+        }
+
+        let base = localURL.standardizedFileURL.pathComponents
+        var directories: [String] = []
+        var files: [(url: URL, relative: String, size: Int64)] = []
+        for case let url as URL in enumerator {
+            let values = try url.resourceValues(forKeys: Set(keys))
+            if url.lastPathComponent == ".DS_Store" || values.isSymbolicLink == true { continue }
+            let relative = url.standardizedFileURL.pathComponents.dropFirst(base.count).joined(separator: "/")
+            if values.isDirectory == true {
+                directories.append(relative)
+            } else {
+                files.append((url, relative, Int64(values.fileSize ?? 0)))
+            }
+        }
+
+        let reporter = ProgressReporter(total: files.reduce(Int64(0)) { $0 + $1.size }, handler: progress)
+        try ensureDirectory(remotePath)
+        for directory in directories {
+            if cancellation?.isCancelled == true { throw FTPError.cancelled }
+            try ensureDirectory(FTPPath.join(remotePath, directory))
+        }
+        for (index, file) in files.enumerated() {
+            if cancellation?.isCancelled == true { throw FTPError.cancelled }
+            onFile?(file.relative, index + 1, files.count)
+            try uploadFile(file.url, to: FTPPath.join(remotePath, file.relative), localSize: file.size,
+                           resume: resume, cancellation: cancellation, reporter: reporter)
+        }
+        reporter.finish()
+    }
+
+    /// Recorre una carpeta remota. Los enlaces simbólicos se omiten para evitar bucles.
+    private func collectRemote(
+        _ path: String,
+        relative: String,
+        directories: inout [String],
+        files: inout [(relative: String, size: Int64?)],
+        cancellation: FTPCancellationToken?
+    ) throws {
+        for item in try listDirectory(path) {
+            if cancellation?.isCancelled == true { throw FTPError.cancelled }
+            let childRelative = relative.isEmpty ? item.name : relative + "/" + item.name
+            switch item.kind {
+            case .directory:
+                directories.append(childRelative)
+                try collectRemote(FTPPath.join(path, item.name), relative: childRelative,
+                                  directories: &directories, files: &files, cancellation: cancellation)
+            case .file:
+                files.append((childRelative, item.size))
+            case .symlink:
+                log(.info, "Enlace simbólico omitido: \(childRelative)")
+            }
+        }
+    }
+
+    private func downloadFile(
+        _ remotePath: String,
+        to localURL: URL,
+        remoteSize: Int64?,
+        resume: Bool,
+        cancellation: FTPCancellationToken?,
+        reporter: ProgressReporter
+    ) throws {
+        var offset: Int64 = 0
+        if resume, supportsResume, let existing = Self.localSize(of: localURL) {
+            offset = existing
+        }
+        if let remoteSize, offset > remoteSize { offset = 0 }
+        if let remoteSize, offset > 0, offset == remoteSize {
+            reporter.add(offset)
+            return
+        }
+
+        let handle: FileHandle
+        if offset > 0 {
+            handle = try FileHandle(forWritingTo: localURL)
+            try handle.truncate(atOffset: UInt64(offset))
+            try handle.seekToEnd()
+            reporter.add(offset)
+            log(.info, "Reanudando \(remotePath) desde \(offset) bytes.")
+        } else {
+            guard FileManager.default.createFile(atPath: localURL.path, contents: nil) else {
+                throw FTPError.localFile("no se pudo crear \(localURL.path)")
+            }
+            handle = try FileHandle(forWritingTo: localURL)
+        }
+        defer { try? handle.close() }
+
+        try withDataConnection(command: "RETR \(remotePath)", restartAt: offset) { data in
+            while let chunk = try data.readChunk() {
+                if cancellation?.isCancelled == true { throw FTPError.cancelled }
+                try handle.write(contentsOf: chunk)
+                reporter.add(Int64(chunk.count))
+            }
+        }
+    }
+
+    private func uploadFile(
+        _ localURL: URL,
+        to remotePath: String,
+        localSize: Int64,
+        resume: Bool,
+        cancellation: FTPCancellationToken?,
+        reporter: ProgressReporter
+    ) throws {
+        var offset: Int64 = 0
+        if resume, supportsResume, let remoteSize = try size(of: remotePath) {
+            offset = remoteSize
+        }
+        if offset > localSize { offset = 0 }
+        if offset > 0, offset == localSize {
+            reporter.add(offset)
+            return
+        }
+
         let handle: FileHandle
         do {
             handle = try FileHandle(forReadingFrom: localURL)
@@ -218,18 +393,24 @@ public final class FTPClient: @unchecked Sendable {
         }
         defer { try? handle.close() }
 
-        let attributes = try? FileManager.default.attributesOfItem(atPath: localURL.path)
-        let total = (attributes?[.size] as? NSNumber)?.int64Value
-        let reporter = ProgressReporter(total: total, handler: progress)
+        if offset > 0 {
+            try handle.seek(toOffset: UInt64(offset))
+            reporter.add(offset)
+            log(.info, "Reanudando \(remotePath) desde \(offset) bytes.")
+        }
 
-        try withDataConnection(command: "STOR \(remotePath)") { data in
+        try withDataConnection(command: "STOR \(remotePath)", restartAt: offset) { data in
             while let chunk = try handle.read(upToCount: 65_536), !chunk.isEmpty {
                 if cancellation?.isCancelled == true { throw FTPError.cancelled }
                 try data.write(chunk)
                 reporter.add(Int64(chunk.count))
             }
-            reporter.finish()
         }
+    }
+
+    private static func localSize(of url: URL) -> Int64? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path) else { return nil }
+        return (attributes[.size] as? NSNumber)?.int64Value
     }
 
     // MARK: Canal de datos (modo pasivo)
@@ -259,9 +440,15 @@ public final class FTPClient: @unchecked Sendable {
         return socket
     }
 
-    private func withDataConnection<T>(command: String, _ body: (FTPSocket) throws -> T) throws -> T {
+    private func withDataConnection<T>(command: String, restartAt offset: Int64 = 0, _ body: (FTPSocket) throws -> T) throws -> T {
         let data = try openDataSocket()
         defer { data.close() }
+
+        if offset > 0 {
+            // REST debe ir justo antes de RETR/STOR.
+            let reply = try send("REST \(offset)")
+            guard reply.code == 350 else { throw FTPError.unexpectedReply(command: "REST", reply: reply) }
+        }
 
         let preliminary = try send(command)
         if preliminary.isPositiveCompletion {
