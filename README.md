@@ -9,7 +9,7 @@ Cliente FTP/FTPS básico para macOS, escrito en Swift y SwiftUI, sin dependencia
 - Servidores guardados en la barra lateral. Las contraseñas se guardan en el Llavero de macOS.
 - **FTP**, **FTPS explícito** (`AUTH TLS`, puerto 21) y **FTPS implícito** (puerto 990).
   - Con FTPS también se cifra el canal de datos (`PROT P`).
-  - Opción para aceptar certificados autofirmados.
+  - Certificados autofirmados con huella fijada: la primera vez se acepta su huella SHA-256 y después se rechaza cualquier otro certificado, también en los canales de datos.
 - Modo pasivo (`EPSV`, y `PASV` si el servidor no admite `EPSV`).
 - Listados con `MLSD` cuando el servidor lo admite. Si no, se usa `LIST` en formato Unix o DOS/IIS.
 - Navegación por carpetas, con ordenación por nombre, tamaño y fecha.
@@ -73,6 +73,16 @@ Sources/
     Views/                Barra lateral, editor de servidor, explorador, transferencias y registro
 Tests/FTPKitTests/        Tests (swift-testing)
 ```
+
+## Seguridad
+
+- **Huella del certificado fijada** para servidores con certificado autofirmado. Si el certificado cambia, la app bloquea la conexión y avisa de una posible suplantación.
+- **Confirmación antes de usar FTP sin cifrar** cada vez que se va a enviar la contraseña.
+- **Nombres remotos validados:** se ignoran las entradas con `/`, `..` o caracteres de control, y en las descargas de carpetas se comprueba que cada archivo queda dentro del destino. Así un servidor malicioso no puede escribir fuera de Descargas.
+- **Sin inyección de órdenes:** se rechaza cualquier orden con saltos de línea o caracteres nulos, por ejemplo la que vendría de un archivo local llamado `a\r\nDELE x`.
+- **Sin rebajar el cifrado:** si se eligió FTPS y el servidor no lo admite, la conexión falla; nunca pasa a FTP sin cifrar.
+- **IP de `PASV` ignorada:** el canal de datos va siempre al mismo host que el de control, lo que evita que el servidor redirija la conexión a otra máquina.
+- **Contraseñas en el Llavero**, nunca en disco ni en el registro.
 
 ## Decisiones técnicas
 

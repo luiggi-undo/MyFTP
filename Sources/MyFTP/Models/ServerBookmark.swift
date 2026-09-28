@@ -10,7 +10,10 @@ struct ServerBookmark: Identifiable, Codable, Hashable {
     var port = 21
     var username = ""
     var security: FTPConfiguration.Security = .explicitTLS
+    /// Certificado autofirmado: en lugar de la validación del sistema se fija su huella.
     var allowInvalidCertificates = false
+    /// Huella SHA-256 del certificado aceptado (solo con `allowInvalidCertificates`).
+    var pinnedFingerprint: String?
     var initialPath = ""
 
     func configuration(password: String) -> FTPConfiguration {
@@ -21,7 +24,8 @@ struct ServerBookmark: Identifiable, Codable, Hashable {
             username: anonymous ? "anonymous" : username,
             password: anonymous && password.isEmpty ? "anonymous@" : password,
             security: security,
-            allowInvalidCertificates: allowInvalidCertificates
+            allowInvalidCertificates: allowInvalidCertificates,
+            pinnedFingerprint: pinnedFingerprint
         )
     }
 }

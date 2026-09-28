@@ -13,6 +13,8 @@ public final class FTPClient: @unchecked Sendable {
 
     private var control: FTPSocket?
     private var protectData = false
+    /// Huella del certificado del canal de control; los canales de datos deben presentar la misma.
+    private var controlFingerprint: String?
     private var epsvUnsupported = false
 
     public init(configuration: FTPConfiguration) {
@@ -30,6 +32,9 @@ public final class FTPClient: @unchecked Sendable {
         log(.info, "Conectando a \(configuration.host):\(configuration.port)…")
 
         let socket = try FTPSocket(host: configuration.host, port: configuration.port, timeout: configuration.timeout)
+        socket.onTLSEstablished = { [weak self, unowned socket] in
+            try self?.verifyCertificate(of: socket, isControl: true)
+        }
         control = socket
         do {
             try socket.open(tls: configuration.security == .implicitTLS ? tlsSettings : nil)
@@ -42,6 +47,8 @@ public final class FTPClient: @unchecked Sendable {
                 let reply = try send("AUTH TLS")
                 guard reply.code == 234 else { throw FTPError.unexpectedReply(command: "AUTH TLS", reply: reply) }
                 socket.startTLS(tlsSettings)
+                // Fuerza el handshake y comprueba el certificado antes de enviar usuario y contraseña.
+                _ = try send("NOOP")
                 log(.info, "TLS activado en el canal de control.")
             }
 
@@ -75,6 +82,7 @@ public final class FTPClient: @unchecked Sendable {
         socket.close()
         control = nil
         protectData = false
+        controlFingerprint = nil
         epsvUnsupported = false
         features = []
     }
@@ -121,7 +129,12 @@ public final class FTPClient: @unchecked Sendable {
         let useMLSD = features.contains("MLST")
         let data = try withDataConnection(command: useMLSD ? "MLSD" : "LIST") { try $0.readToEnd() }
         let text = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .isoLatin1) ?? ""
-        return useMLSD ? FTPListParser.parseMLSD(text) : FTPListParser.parseLIST(text)
+        let items = useMLSD ? FTPListParser.parseMLSD(text) : FTPListParser.parseLIST(text)
+        return items.filter { item in
+            if FTPPath.isSafeName(item.name) { return true }
+            log(.error, "Entrada ignorada por seguridad (nombre no válido): \(item.name.debugDescription)")
+            return false
+        }
     }
 
     public func makeDirectory(_ path: String) throws {
@@ -237,14 +250,18 @@ public final class FTPClient: @unchecked Sendable {
             let reporter = ProgressReporter(total: files.reduce(Int64(0)) { $0 + ($1.size ?? 0) }, handler: progress)
             try FileManager.default.createDirectory(at: localURL, withIntermediateDirectories: true)
             for directory in directories {
-                try FileManager.default.createDirectory(at: localURL.appendingPathComponent(directory), withIntermediateDirectories: true)
+                let destination = localURL.appendingPathComponent(directory)
+                guard FTPPath.isContained(destination, in: localURL) else { throw FTPError.unsafeName(directory) }
+                try FileManager.default.createDirectory(at: destination, withIntermediateDirectories: true)
             }
             for (index, file) in files.enumerated() {
                 if cancellation?.isCancelled == true { throw FTPError.cancelled }
+                let destination = localURL.appendingPathComponent(file.relative)
+                guard FTPPath.isContained(destination, in: localURL) else { throw FTPError.unsafeName(file.relative) }
                 onFile?(file.relative, index + 1, files.count)
                 try downloadFile(
                     FTPPath.join(remotePath, file.relative),
-                    to: localURL.appendingPathComponent(file.relative),
+                    to: destination,
                     remoteSize: file.size,
                     resume: resume,
                     cancellation: cancellation,
@@ -278,6 +295,11 @@ public final class FTPClient: @unchecked Sendable {
         for case let url as URL in enumerator {
             let values = try url.resourceValues(forKeys: Set(keys))
             if url.lastPathComponent == ".DS_Store" || values.isSymbolicLink == true { continue }
+            if !FTPPath.isSafeName(url.lastPathComponent) {
+                log(.error, "Omitido por contener caracteres no permitidos: \(url.lastPathComponent.debugDescription)")
+                if values.isDirectory == true { enumerator.skipDescendants() }
+                continue
+            }
             let relative = url.standardizedFileURL.pathComponents.dropFirst(base.count).joined(separator: "/")
             if values.isDirectory == true {
                 directories.append(relative)
@@ -436,6 +458,9 @@ public final class FTPClient: @unchecked Sendable {
         guard let port else { throw FTPError.invalidPassiveReply("sin puerto") }
 
         let socket = try FTPSocket(host: configuration.host, port: port, timeout: configuration.timeout)
+        socket.onTLSEstablished = { [weak self, unowned socket] in
+            try self?.verifyCertificate(of: socket, isControl: false)
+        }
         try socket.open(tls: protectData ? tlsSettings : nil)
         return socket
     }
@@ -480,6 +505,10 @@ public final class FTPClient: @unchecked Sendable {
     @discardableResult
     private func send(_ command: String, logAs: String? = nil) throws -> FTPReply {
         guard let control, !control.isClosed else { throw FTPError.notConnected }
+        // Un salto de línea dentro de un nombre permitiría colar órdenes FTP adicionales.
+        if command.unicodeScalars.contains(where: { $0 == "\r" || $0 == "\n" || $0 == "\0" }) {
+            throw FTPError.invalidCharacters(command)
+        }
         log(.command, logAs ?? command)
         try control.write(Data((command + "\r\n").utf8))
         return try readReply()
@@ -495,6 +524,33 @@ public final class FTPClient: @unchecked Sendable {
                 if reply.code == 421 { control.close() }
                 return reply
             }
+        }
+    }
+
+    /// Con certificados autofirmados (validación del sistema desactivada) se exige que el
+    /// certificado coincida con la huella que el usuario aceptó, tanto en el canal de control
+    /// como en los de datos. Con validación del sistema no hace falta comprobar nada más.
+    private func verifyCertificate(of socket: FTPSocket, isControl: Bool) throws {
+        guard configuration.allowInvalidCertificates else { return }
+        guard let certificate = socket.peerCertificate() else {
+            throw FTPError.connectionFailed("no se pudo leer el certificado del servidor")
+        }
+
+        if isControl {
+            guard let pinned = configuration.pinnedFingerprint else {
+                throw FTPError.certificateNotPinned(fingerprint: certificate.fingerprint, summary: certificate.summary)
+            }
+            guard pinned == certificate.fingerprint else {
+                throw FTPError.certificateChanged(expected: pinned, received: certificate.fingerprint, summary: certificate.summary)
+            }
+            controlFingerprint = certificate.fingerprint
+            log(.info, "Certificado verificado (huella fijada).")
+        } else if certificate.fingerprint != controlFingerprint {
+            throw FTPError.certificateChanged(
+                expected: controlFingerprint ?? "",
+                received: certificate.fingerprint,
+                summary: certificate.summary
+            )
         }
     }
 

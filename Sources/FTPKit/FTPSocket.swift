@@ -1,4 +1,6 @@
+import CryptoKit
 import Foundation
+import Security
 
 struct FTPTLSSettings {
     var peerName: String
@@ -20,6 +22,10 @@ final class FTPSocket {
     private var needsBlockingRead = false
     private(set) var isClosed = false
     var timeout: TimeInterval
+    /// Se llama una vez, tras la primera lectura o escritura con TLS activo (handshake completado).
+    /// Si lanza un error, la operación falla y los datos leídos no se entregan.
+    var onTLSEstablished: (() throws -> Void)?
+    private var pendingTLSCheck = false
 
     init(host: String, port: Int, timeout: TimeInterval) throws {
         var inputStream: InputStream?
@@ -78,6 +84,29 @@ final class FTPSocket {
         input.setProperty(sslSettings, forKey: key)
         output.setProperty(sslSettings, forKey: key)
         needsBlockingRead = true
+        pendingTLSCheck = true
+    }
+
+    private func runTLSCheckIfNeeded() throws {
+        guard pendingTLSCheck else { return }
+        pendingTLSCheck = false
+        try onTLSEstablished?()
+    }
+
+    /// Huella SHA-256 y descripción del certificado del servidor (disponible tras el handshake).
+    func peerCertificate() -> (fingerprint: String, summary: String)? {
+        let key = Stream.PropertyKey(kCFStreamPropertySSLPeerTrust as String)
+        guard let value = input.property(forKey: key) else { return nil }
+        let object = value as AnyObject
+        guard CFGetTypeID(object) == SecTrustGetTypeID() else { return nil }
+        let trust = object as! SecTrust
+        guard let chain = SecTrustCopyCertificateChain(trust) as? [SecCertificate], let leaf = chain.first else {
+            return nil
+        }
+        let digest = SHA256.hash(data: SecCertificateCopyData(leaf) as Data)
+        let fingerprint = digest.map { String(format: "%02X", $0) }.joined(separator: ":")
+        let summary = (SecCertificateCopySubjectSummary(leaf) as String?) ?? "sin nombre"
+        return (fingerprint, summary)
     }
 
     func close() {
@@ -112,6 +141,7 @@ final class FTPSocket {
             }
         }
         needsBlockingRead = false
+        try runTLSCheckIfNeeded()
     }
 
     // MARK: Lectura
@@ -177,6 +207,7 @@ final class FTPSocket {
     private func readOnce() throws -> Bool {
         let count = input.read(&readBuffer, maxLength: readBuffer.count)
         if count > 0 {
+            try runTLSCheckIfNeeded()
             buffer.append(readBuffer, count: count)
             return true
         }

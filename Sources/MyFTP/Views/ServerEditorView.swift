@@ -6,6 +6,10 @@ struct ServerEditorView: View {
     @State private var draft: ServerBookmark
     @State private var password = ""
 
+    private var storedFingerprint: String? {
+        model.bookmarks.first { $0.id == draft.id }?.pinnedFingerprint
+    }
+
     init(bookmark: ServerBookmark) {
         _draft = State(initialValue: bookmark)
     }
@@ -22,7 +26,22 @@ struct ServerEditorView: View {
                     }
                 }
                 if draft.security != .plain {
-                    Toggle("Aceptar certificados no válidos o autofirmados", isOn: $draft.allowInvalidCertificates)
+                    Toggle(isOn: $draft.allowInvalidCertificates) {
+                        Text("Certificado autofirmado")
+                        Text("En lugar de validar el certificado con las autoridades del sistema, la primera vez se te pedirá aceptar su huella y después solo se aceptará ese certificado.")
+                    }
+                    if draft.allowInvalidCertificates, let fingerprint = storedFingerprint {
+                        LabeledContent("Huella aceptada") {
+                            VStack(alignment: .trailing, spacing: 4) {
+                                Text(fingerprint)
+                                    .font(.system(.caption, design: .monospaced))
+                                    .textSelection(.enabled)
+                                    .multilineTextAlignment(.trailing)
+                                Button("Olvidar certificado") { model.forgetCertificate(for: draft.id) }
+                                    .controlSize(.small)
+                            }
+                        }
+                    }
                 }
             }
 

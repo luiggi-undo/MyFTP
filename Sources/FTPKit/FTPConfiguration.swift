@@ -17,7 +17,10 @@ public struct FTPConfiguration: Sendable, Hashable {
     public var username: String
     public var password: String
     public var security: Security
+    /// Desactiva la validación del sistema y usa en su lugar la huella fijada (`pinnedFingerprint`).
     public var allowInvalidCertificates: Bool
+    /// Huella SHA-256 del certificado aceptado por el usuario (modo certificado autofirmado).
+    public var pinnedFingerprint: String?
     public var timeout: TimeInterval
 
     public init(
@@ -27,6 +30,7 @@ public struct FTPConfiguration: Sendable, Hashable {
         password: String = "anonymous@",
         security: Security = .explicitTLS,
         allowInvalidCertificates: Bool = false,
+        pinnedFingerprint: String? = nil,
         timeout: TimeInterval = 30
     ) {
         self.host = host
@@ -35,6 +39,7 @@ public struct FTPConfiguration: Sendable, Hashable {
         self.password = password
         self.security = security
         self.allowInvalidCertificates = allowInvalidCertificates
+        self.pinnedFingerprint = pinnedFingerprint?.uppercased()
         self.timeout = timeout
     }
 }

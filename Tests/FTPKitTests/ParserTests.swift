@@ -137,3 +137,31 @@ struct ListParserTests {
         #expect(items[1].modified != nil)
     }
 }
+
+@Suite("Seguridad")
+struct SecurityTests {
+    @Test func safeNames() {
+        #expect(FTPPath.isSafeName("index.html"))
+        #expect(FTPPath.isSafeName("Mis fotos"))
+        #expect(FTPPath.isSafeName(".htaccess"))
+        #expect(!FTPPath.isSafeName(""))
+        #expect(!FTPPath.isSafeName("."))
+        #expect(!FTPPath.isSafeName(".."))
+        #expect(!FTPPath.isSafeName("../../Library/LaunchAgents/x.plist"))
+        #expect(!FTPPath.isSafeName("a/b"))
+        #expect(!FTPPath.isSafeName("foto\r\nDELE index.html"))
+        #expect(!FTPPath.isSafeName("nulo\u{0}"))
+    }
+
+    @Test func containment() {
+        let base = URL(fileURLWithPath: "/Users/ana/Downloads/web")
+        #expect(FTPPath.isContained(base.appendingPathComponent("css/estilos.css"), in: base))
+        #expect(!FTPPath.isContained(base.appendingPathComponent("../../.ssh/authorized_keys"), in: base))
+        #expect(!FTPPath.isContained(URL(fileURLWithPath: "/Users/ana/Downloads/web2/x"), in: base))
+    }
+
+    @Test func maliciousListingIsParsedButFlagged() {
+        let items = FTPListParser.parseMLSD("type=file;size=1; ../../evil.plist\r\ntype=file;size=1; ok.txt")
+        #expect(items.filter { FTPPath.isSafeName($0.name) }.map(\.name) == ["ok.txt"])
+    }
+}

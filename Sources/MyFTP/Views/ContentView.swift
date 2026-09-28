@@ -33,6 +33,41 @@ struct ContentView: View {
         } message: {
             Text(model.errorMessage ?? "")
         }
+        .alert(
+            model.certificatePrompt?.changed == true ? "¡El certificado del servidor ha cambiado!" : "¿Confiar en este certificado?",
+            isPresented: Binding(
+                get: { model.certificatePrompt != nil },
+                set: { if !$0 { model.certificatePrompt = nil } }
+            ),
+            presenting: model.certificatePrompt
+        ) { prompt in
+            Button(prompt.changed ? "Confiar en el nuevo certificado" : "Confiar y conectar",
+                   role: prompt.changed ? .destructive : nil) {
+                model.trustCertificate(prompt)
+            }
+            Button("Cancelar", role: .cancel) {}
+        } message: { prompt in
+            if prompt.changed {
+                Text("Puede tratarse de una suplantación (alguien interceptando la conexión). Acepta el nuevo certificado solo si sabes que el servidor lo ha renovado; compruébalo con tu proveedor.\n\n\(prompt.summary)\nSHA-256: \(prompt.fingerprint)")
+            } else {
+                Text("Es la primera vez que te conectas a este servidor con certificado autofirmado. Si confías en él, se guardará su huella y en adelante se rechazará cualquier otro certificado.\n\n\(prompt.summary)\nSHA-256: \(prompt.fingerprint)")
+            }
+        }
+        .alert(
+            "Conexión sin cifrar",
+            isPresented: Binding(
+                get: { model.plainTextPrompt != nil },
+                set: { if !$0 { model.plainTextPrompt = nil } }
+            ),
+            presenting: model.plainTextPrompt
+        ) { bookmark in
+            Button("Conectar sin cifrar", role: .destructive) {
+                model.connect(bookmark, allowPlainText: true)
+            }
+            Button("Cancelar", role: .cancel) {}
+        } message: { _ in
+            Text("Con FTP sin cifrar, tu usuario, tu contraseña y los archivos viajan en claro. Cualquiera en tu misma red (por ejemplo, una wifi pública) podría verlos. Usa FTPS si tu servidor lo admite.")
+        }
     }
 }
 
