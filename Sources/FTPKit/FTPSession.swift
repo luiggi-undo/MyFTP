@@ -74,7 +74,7 @@ public final class FTPSession: @unchecked Sendable {
         try await run { try $0.upload(localURL, to: remotePath, cancellation: cancellation, progress: progress) }
     }
 
-    private func run<T>(_ work: @escaping (FTPClient) throws -> T) async throws -> T {
+    private func run<T: Sendable>(_ work: @escaping @Sendable (FTPClient) throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
             queue.async { [client] in
                 continuation.resume(with: Result { try work(client) })

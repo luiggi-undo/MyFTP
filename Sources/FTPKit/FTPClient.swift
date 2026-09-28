@@ -2,7 +2,10 @@ import Foundation
 
 /// Cliente FTP/FTPS síncrono. Cada llamada bloquea hasta completarse, así que
 /// debe usarse desde un hilo de fondo; `FTPSession` lo envuelve con async/await.
-public final class FTPClient {
+///
+/// No es seguro usarlo desde varios hilos a la vez. Es `@unchecked Sendable`
+/// porque `FTPSession` serializa todos los accesos en su propia cola.
+public final class FTPClient: @unchecked Sendable {
     public let configuration: FTPConfiguration
     public var logHandler: (@Sendable (FTPLogEntry) -> Void)?
     public private(set) var features: Set<String> = []
