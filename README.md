@@ -56,7 +56,7 @@ VERSION=1.0 BUILD=1 \
 
 Para ver las identidades de firma disponibles: `security find-identity -v -p codesigning`.
 
-Si pones un icono en `Resources/AppIcon.icns`, el script lo incluye en la app.
+El icono está en `Resources/AppIcon.icon`. Es un archivo de Icon Composer: ábrelo con Icon Composer para editarlo. El script lo compila con `actool`, la herramienta de Xcode, y lo incluye en la app. Si prefieres un icono clásico, borra `AppIcon.icon` y pon en su lugar un `Resources/AppIcon.icns`.
 
 ## Estructura
 

@@ -27,8 +27,29 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN_DIR/$APP_NAME" "$APP/Contents/MacOS/$APP_NAME"
 
+# Icono: Resources/AppIcon.icon (Icon Composer) o, en su defecto, Resources/AppIcon.icns.
 ICON_ENTRY=""
-if [[ -f "Resources/AppIcon.icns" ]]; then
+if [[ -d "Resources/AppIcon.icon" ]]; then
+    echo "▸ Compilando el icono (Icon Composer)…"
+    ICON_TMP="build/icon"
+    rm -rf "$ICON_TMP"
+    mkdir -p "$ICON_TMP"
+    if xcrun actool "Resources/AppIcon.icon" \
+        --compile "$ICON_TMP" \
+        --platform macosx \
+        --target-device mac \
+        --minimum-deployment-target 27.0 \
+        --app-icon AppIcon \
+        --output-partial-info-plist "$ICON_TMP/partial.plist" \
+        --output-format human-readable-text --errors --warnings > "$ICON_TMP/actool.log" 2>&1; then
+        cp "$ICON_TMP"/Assets.car "$APP/Contents/Resources/" 2>/dev/null || true
+        cp "$ICON_TMP"/AppIcon.icns "$APP/Contents/Resources/" 2>/dev/null || true
+        ICON_ENTRY="<key>CFBundleIconName</key><string>AppIcon</string><key>CFBundleIconFile</key><string>AppIcon</string>"
+    else
+        echo "⚠︎ No se pudo compilar el icono; la app se creará sin él. Detalles:" >&2
+        cat "$ICON_TMP/actool.log" >&2
+    fi
+elif [[ -f "Resources/AppIcon.icns" ]]; then
     cp "Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
     ICON_ENTRY="<key>CFBundleIconFile</key><string>AppIcon</string>"
 fi
